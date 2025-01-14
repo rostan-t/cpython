@@ -45,7 +45,7 @@ class object "PyObject *" "&PyBaseObject_Type"
 
 #define MCACHE_HASH_METHOD(type, name)                                  \
     MCACHE_HASH(FT_ATOMIC_LOAD_UINT32_RELAXED((type)->tp_version_tag),   \
-                ((Py_ssize_t)(name)) >> 3)
+                _PyObject_HashFast(name))
 #define MCACHE_CACHEABLE_NAME(name)                             \
         PyUnicode_CheckExact(name) &&                           \
         PyUnicode_IS_READY(name) &&                             \
@@ -5549,6 +5549,7 @@ _PyType_LookupRefAndVersion(PyTypeObject *type, PyObject *name, unsigned int *ve
     int error;
     PyInterpreterState *interp = _PyInterpreterState_GET();
 
+    int is_name_cacheable = MCACHE_CACHEABLE_NAME(name);
     unsigned int h = MCACHE_HASH_METHOD(type, name);
     struct type_cache *cache = get_type_cache();
     struct type_cache_entry *entry = &cache->hashtable[h];
@@ -5558,8 +5559,9 @@ _PyType_LookupRefAndVersion(PyTypeObject *type, PyObject *name, unsigned int *ve
         uint32_t sequence = _PySeqLock_BeginRead(&entry->sequence);
         uint32_t entry_version = _Py_atomic_load_uint32_relaxed(&entry->version);
         uint32_t type_version = _Py_atomic_load_uint32_acquire(&type->tp_version_tag);
-        if (entry_version == type_version &&
-            _Py_atomic_load_ptr_relaxed(&entry->name) == name) {
+        if (is_name_cacheable &&
+            entry_version == type_version &&
+            PyUnicode_Compare(_Py_atomic_load_ptr_relaxed(&entry->name), name)) {
             OBJECT_STAT_INC_COND(type_cache_hits, !is_dunder_name(name));
             OBJECT_STAT_INC_COND(type_cache_dunder_hits, is_dunder_name(name));
             PyObject *value = _Py_atomic_load_ptr_relaxed(&entry->value);
@@ -5584,7 +5586,8 @@ _PyType_LookupRefAndVersion(PyTypeObject *type, PyObject *name, unsigned int *ve
         }
     }
 #else
-    if (entry->version == type->tp_version_tag &&
+    if (is_name_cacheable &&
+        entry->version == type->tp_version_tag &&
         entry->name == name) {
         assert(type->tp_version_tag);
         OBJECT_STAT_INC_COND(type_cache_hits, !is_dunder_name(name));
@@ -5609,7 +5612,7 @@ _PyType_LookupRefAndVersion(PyTypeObject *type, PyObject *name, unsigned int *ve
     unsigned int assigned_version = 0;
     BEGIN_TYPE_LOCK();
     res = find_name_in_mro(type, name, &error);
-    if (MCACHE_CACHEABLE_NAME(name)) {
+    if (is_name_cacheable) {
         has_version = assign_version_tag(interp, type);
         assigned_version = type->tp_version_tag;
     }
